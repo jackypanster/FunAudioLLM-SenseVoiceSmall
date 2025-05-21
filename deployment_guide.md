@@ -170,7 +170,7 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8888 --workers 1
 服务启动后，可以使用 `curl` 从另一台机器或本地测试接口：
 
 ```bash
-curl -X POST "http://<your_server_ip>:8000/asr_pure" -F "file=@/path/to/your/test_audio.wav"
+curl -X POST "http://127.0.0.1:8888/asr_pure" -F "file=@test_audio.wav"
 ```
 
 **6. 更新服务**
