@@ -86,7 +86,7 @@ Once setup and model logic are implemented:
 
 ```bash
 # Ensure .venv is activated: source .venv/bin/activate
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8888 --workers 1
 ```
 
 *   `--host 0.0.0.0`: Makes the server accessible externally.
@@ -96,7 +96,7 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
 To use a specific GPU (e.g., the second GPU, which is index 1):
 ```bash
 export DEVICE="cuda:1" # or CUDA_VISIBLE_DEVICES=1 and DEVICE="cuda:0"
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8888 --workers 1
 ```
 
 Refer to `deployment_guide.md` for more advanced deployment options, including using `systemd` or `supervisor` for service management and multi-GPU setups.
