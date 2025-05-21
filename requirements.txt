@@ -1,0 +1,18 @@
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Pytorch and audio processing
+torch
+torchaudio
+
+# Hugging Face Transformers (if SenseVoice is loaded this way)
+# transformers
+
+# SenseVoice specific dependencies (Placeholder - verify with model documentation)
+# sentencepiece
+# pyyaml
+# other_model_specific_library
+
+# For environment variable loading (optional, if you use .env files)
+# python-dotenv 
