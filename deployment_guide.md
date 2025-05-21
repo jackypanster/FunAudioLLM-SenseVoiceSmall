@@ -108,11 +108,11 @@ source .venv/bin/activate
 ```bash
 # 在项目根目录，激活 .venv 环境后
 # 示例启动命令
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8888 --workers 1
 ```
 
 *   `--host 0.0.0.0`: 使服务可以从外部访问。
-*   `--port 8000`: 服务监听的端口。
+*   `--port 8888`: 服务监听的端口。
 *   `--workers 1`: Uvicorn worker 的数量。对于 GPU 绑定的模型服务，通常设置为 1 worker/GPU，或者根据具体模型和并发需求调整。如果有多个 GPU 并希望每个 worker 使用不同 GPU，需要结合 `CUDA_VISIBLE_DEVICES` 等环境变量或在应用内进行设备分配。
 
 **4. 服务持久化 (推荐)**

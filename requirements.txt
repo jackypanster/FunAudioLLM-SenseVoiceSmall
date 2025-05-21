@@ -5,6 +5,7 @@ python-multipart
 # Pytorch and audio processing
 torch
 torchaudio
+numpy
 
 # Hugging Face Transformers (if SenseVoice is loaded this way)
 # transformers

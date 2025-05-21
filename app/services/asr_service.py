@@ -66,7 +66,7 @@ class ASRService:
                 else: # Should not happen if TARGET_CHANNELS is 1 and audio has 0 channels
                     raise AudioProcessingError(f"Audio has an unexpected number of channels: {waveform.shape[0]}")
             
-            # waveform = waveform.to(self.device) # Move tensor to device
+            waveform = waveform.to(self.device) # Move tensor to device
 
             logger.info(f"Audio preprocessed: duration {waveform.shape[1]/TARGET_SAMPLE_RATE:.2f}s, sample rate {TARGET_SAMPLE_RATE}, channels {waveform.shape[0]}")
 
