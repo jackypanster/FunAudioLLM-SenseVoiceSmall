@@ -3,6 +3,7 @@ import time
 import torchaudio
 import torch
 import io
+import asyncio # Keep asyncio for potential async operations in real model
 from fastapi import UploadFile
 from app.models.sensevoice_loader import SenseVoiceLoader, ModelLoadError # Assuming SenseVoiceLoader is in models directory
 
@@ -27,14 +28,17 @@ class ASRService:
         try:
             self.model = self.model_loader.get_model()
             self.device = self.model_loader.get_device()
-            # self.processor = self.model_loader.get_processor() # If using Hugging Face processor
+            self.processor = self.model_loader.get_processor() # Might be None
             if self.model == "dummy_model_object": # Check if the dummy is still there
                 logger.warning("ASRService initialized with a DUMMY model. Transcription will not work.")
             else:
                 logger.info(f"ASRService initialized with model on device: {self.device}")
+                if self.processor:
+                    logger.info("ASRService: Processor/tokenizer also loaded.")
         except ModelLoadError as e:
-            logger.error(f"ASRService initialization failed: Could not load model - {e}")
-            # Depending on desired behavior, could re-raise or set a flag indicating service is unhealthy
+            logger.error(f"ASRService initialization failed: Critical model loading error - {e}")
+            # This error will propagate and should be handled by the application lifespan to prevent startup
+            # or mark the service as unhealthy immediately.
             raise
 
     async def transcribe_audio_file(self, audio_file: UploadFile) -> tuple[str, float]:
@@ -68,48 +72,59 @@ class ASRService:
             
             waveform = waveform.to(self.device) # Move tensor to device
 
-            logger.info(f"Audio preprocessed: duration {waveform.shape[1]/TARGET_SAMPLE_RATE:.2f}s, sample rate {TARGET_SAMPLE_RATE}, channels {waveform.shape[0]}")
+            logger.info(f"Audio preprocessed: duration {waveform.shape[1]/TARGET_SAMPLE_RATE:.2f}s, on device {waveform.device}")
 
         except Exception as e:
-            logger.error(f"Error during audio preprocessing: {e}", exc_info=True)
+            logger.error(f"Error during audio preprocessing for {audio_file.filename}: {e}", exc_info=True)
             raise AudioProcessingError(f"Failed to preprocess audio: {e}")
 
         # 2. Model Inference
         try:
-            # --- Placeholder for actual model inference --- 
-            # This highly depends on the specific SenseVoiceSmall model API.
-            # 
-            # Example if using Hugging Face model:
-            # inputs = self.processor(waveform.squeeze(0).cpu().numpy(), return_tensors="pt", sampling_rate=TARGET_SAMPLE_RATE)
-            # input_features = inputs.input_features.to(self.device)
-            # with torch.no_grad():
-            #     predicted_ids = self.model.generate(input_features, max_length=256) # Adjust max_length
-            # transcription = self.processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
-            # 
-            # Example if using a custom PyTorch model:
-            # waveform_on_device = waveform.to(self.device)
-            # with torch.no_grad():
-            #    logits = self.model(waveform_on_device) # Model call
-            #    # Process logits to get transcription (e.g., CTC decode or argmax if applicable)
-            #    transcription = self._decode_logits(logits) # You'd need a _decode_logits method
-            
-            # For now, a DUMMY transcription:
-            logger.warning("Performing DUMMY transcription. PLEASE REPLACE WITH ACTUAL MODEL INFERENCE.")
-            # Simulate some processing delay
-            await asyncio.sleep(0.1 + waveform.shape[1] / TARGET_SAMPLE_RATE * 0.1) # Simulate 10% of audio duration + 100ms
-            transcription = f"Dummy transcription for audio of {waveform.shape[1]/TARGET_SAMPLE_RATE:.2f}s: Hello World."
-            # --- End of placeholder ---
+            # --- Actual Model Inference Logic --- 
+            # This section MUST be adapted based on your specific model's API.
+            transcription = ""
+            with torch.no_grad(): # Essential for inference to disable gradient calculations
+                # **Option 1: If using a Hugging Face model with a processor (e.g., Wav2Vec2, Whisper)**
+                # if self.processor and hasattr(self.model, 'generate'): # Seq2Seq models like Whisper
+                #     inputs = self.processor(waveform.squeeze(0).cpu().numpy(), return_tensors="pt", sampling_rate=TARGET_SAMPLE_RATE)
+                #     input_features = inputs.input_features.to(self.device)
+                #     predicted_ids = self.model.generate(input_features, max_length=256) # Adjust as needed
+                #     transcription = self.processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
+                # elif self.processor: # Other types like CTC models (e.g. Wav2Vec2)
+                #     inputs = self.processor(waveform.squeeze(0).cpu().numpy(), return_tensors="pt", sampling_rate=TARGET_SAMPLE_RATE, padding=True)
+                #     input_values = inputs.input_values.to(self.device)
+                #     attention_mask = inputs.attention_mask.to(self.device) if hasattr(inputs, 'attention_mask') else None
+                #     logits = self.model(input_values, attention_mask=attention_mask).logits
+                #     predicted_ids = torch.argmax(logits, dim=-1)
+                #     transcription = self.processor.batch_decode(predicted_ids)[0]
+                # else:
+                #     # **Option 2: If using a custom PyTorch model without a HuggingFace processor**
+                #     # You'll need to pass the waveform directly and handle its output.
+                #     # output = self.model(waveform) 
+                #     # transcription = self._decode_custom_output(output) # Implement this helper
+                #     logger.error("Model inference logic not fully implemented for non-HuggingFace or unknown model type.")
+                #     raise ModelInferenceError("Inference logic not implemented for the loaded model type.")
 
-            logger.info(f"Transcription successful.")
+                # **** START CRITICAL SECTION: Replace with actual inference ****
+                # Fallback if no specific logic was matched/implemented:
+                if not transcription:
+                    logger.error("Actual model inference logic is NOT IMPLEMENTED in app/services/asr_service.py.")
+                    logger.error("Please edit the transcribe_audio_file method to call your model and decode its output.")
+                    # Simulating a very brief processing time for the error case
+                    await asyncio.sleep(0.05)
+                    raise ModelInferenceError("Transcription inference logic not implemented.")
+                # **** END CRITICAL SECTION ****
 
-        except RuntimeError as e: # Catch PyTorch runtime errors, e.g. CUDA errors during inference
-            logger.error(f"Runtime error during model inference: {e}", exc_info=True)
+            logger.info(f"Transcription successful for {audio_file.filename}.")
+
+        except RuntimeError as e:
+            logger.error(f"Runtime error during model inference for {audio_file.filename}: {e}", exc_info=True)
             if "CUDA out of memory" in str(e):
-                raise ModelInferenceError("CUDA out of memory during inference. Try with a smaller audio file or a more powerful GPU.")
+                raise ModelInferenceError("CUDA out of memory during inference. Try with a smaller audio file or check GPU memory.")
             raise ModelInferenceError(f"Model inference failed with runtime error: {e}")
         except Exception as e:
-            logger.error(f"Unexpected error during model inference: {e}", exc_info=True)
-            raise ModelInferenceError(f"Model inference failed: {e}")
+            logger.error(f"Unexpected error during model inference for {audio_file.filename}: {e}", exc_info=True)
+            raise ModelInferenceError(f"Model inference failed unexpectedly: {e}")
 
         # 3. Result Postprocessing (Optional)
         # transcription = transcription.strip() # Example
@@ -127,6 +142,11 @@ class ASRService:
     #     # or a custom decoder.
     #     logger.warning("_decode_logits is a placeholder and not implemented.")
     #     return "Decoded text (placeholder)"
+
+    # def _decode_custom_output(self, model_output):
+    #     # Implement this if your model is not a standard HuggingFace one and needs custom decoding
+    #     # For example, applying argmax, then mapping indices to characters/tokens.
+    #     raise NotImplementedError("Custom model output decoding is not implemented.")
 
 # This import should be at the top, but to avoid breaking the dummy transcription if asyncio isn't used yet:
 import asyncio 
