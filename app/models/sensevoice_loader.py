@@ -64,7 +64,7 @@ class SenseVoiceLoader:
             self.model = AutoModel(
                 model=FUNASR_MODEL_NAME_OR_PATH,
                 # model_revision="master", # Optional: if you need a specific revision from HF
-                trust_remote_code=True,   # Crucial for models with custom code
+                trust_remote_code=True,   # Keep True, funasr might need it for ModelScope models
                 device=self.device,
                 # vad_model="fsmn-vad", # Optional: VAD model, can be added later
                 # vad_kwargs={"max_single_segment_time": 30000}, # Optional: VAD arguments
