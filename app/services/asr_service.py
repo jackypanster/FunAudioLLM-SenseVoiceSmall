@@ -3,16 +3,17 @@ import time
 import torchaudio
 import torch
 import io
-import asyncio
+# import asyncio # asyncio import moved to the bottom as it's not used in this version of the file
 
 from fastapi import UploadFile
-from app.models.sensevoice_loader import SenseVoiceLoader, ModelLoadError # Assuming SenseVoiceLoader is in models directory
+from app.models.sensevoice_loader import SenseVoiceLoader, ModelLoadError
+from funasr.utils.postprocess_utils import rich_transcription_postprocess # For post-processing funasr output
 
 logger = logging.getLogger(__name__)
 
-# --- Configuration --- (Can be moved to a config file or env vars)
-TARGET_SAMPLE_RATE = 16000 # Example: Most ASR models expect 16kHz
-TARGET_CHANNELS = 1      # Example: Mono audio
+# Configuration for ASRService, can be externalized
+# TARGET_SAMPLE_RATE = 16000 # funasr model usually defines its expected sample rate
+# TARGET_CHANNELS = 1      # funasr model usually defines its expected channels
 
 class AudioProcessingError(Exception):
     "Custom exception for audio processing failures."
@@ -26,121 +27,110 @@ class ASRService:
     def __init__(self, model_loader: SenseVoiceLoader):
         self.model_loader = model_loader
         try:
-            self.model = self.model_loader.get_model()
-            self.processor = self.model_loader.get_processor()
+            self.model = self.model_loader.get_model() # This is now the funasr AutoModel instance
             self.device = self.model_loader.get_device()
             
-            if not self.model or not self.processor:
-                # This case should ideally be caught by ModelLoadError in SenseVoiceLoader if critical components are missing
-                logger.error("ASRService initialized, but model or processor is missing from loader. This is unexpected if loader claimed success.")
-                # Depending on strictness, could raise an error here too.
-                # For now, rely on get_model/get_processor to raise if they are None when accessed later.
-            else:
-                logger.info(f"ASRService initialized successfully with model and processor on device: {self.device}.")
+            if not self.model:
+                logger.error("ASRService initialized, but model is missing from loader.")
+                raise ModelLoadError("ASRService: Model not loaded after SenseVoiceLoader initialization.")
+            
+            # self.processor is no longer explicitly managed here, as funasr.AutoModel integrates it.
+            logger.info(f"ASRService initialized successfully with funasr model on device: {self.device}.")
 
         except ModelLoadError as e:
             logger.error(f"ASRService initialization failed due to ModelLoadError: {e}")
-            raise # Re-raise to be handled by application lifespan/startup logic
+            raise
         except Exception as e:
             logger.error(f"Unexpected error during ASRService initialization: {e}", exc_info=True)
-            raise ModelInferenceError(f"ASRService failed to initialize: {e}") # Wrap as ModelInferenceError or a new ServiceInitError
+            raise ModelInferenceError(f"ASRService failed to initialize: {e}")
 
     async def transcribe_audio_file(self, audio_file: UploadFile) -> tuple[str, float]:
         start_time = time.perf_counter()
 
-        if not self.model or not self.processor:
-            logger.error("ASRService cannot transcribe: model or processor not available.")
-            raise ModelInferenceError("ASR components (model/processor) not loaded. Check service logs.")
+        if not self.model:
+            logger.error("ASRService cannot transcribe: funasr model not available.")
+            raise ModelInferenceError("ASR components (funasr model) not loaded. Check service logs.")
 
         try:
             audio_bytes = await audio_file.read()
             if not audio_bytes:
                 raise AudioProcessingError("Uploaded audio file is empty.")
-
-            # 1. Audio Preprocessing
-            waveform, sample_rate = torchaudio.load(io.BytesIO(audio_bytes))
-
-            if sample_rate != self.processor.feature_extractor.sampling_rate:
-                logger.warning(
-                    f"Input audio sample rate ({sample_rate} Hz) differs from processor's expected rate "
-                    f"({self.processor.feature_extractor.sampling_rate} Hz). Resampling might occur implicitly "
-                    f"by the processor or should be handled explicitly if issues arise."
-                )
-                # Explicit resampling to what the processor expects (usually 16kHz for many models)
-                # If your processor handles resampling, this might be redundant but safe.
-                resampler = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=self.processor.feature_extractor.sampling_rate)
-                waveform = resampler(waveform)
-                effective_sample_rate = self.processor.feature_extractor.sampling_rate
-            else:
-                effective_sample_rate = sample_rate
             
-            if waveform.shape[0] != TARGET_CHANNELS: # Ensure mono
-                if waveform.shape[0] > 1:
-                    waveform = torch.mean(waveform, dim=0, keepdim=True)
-                else:
-                    raise AudioProcessingError(f"Audio has an unexpected number of channels: {waveform.shape[0]}")
-            
-            # The waveform is kept on CPU here as the processor typically handles moving data to device.
-            # If not, you might need: waveform = waveform.to(self.device)
-            logger.info(f"Audio preprocessed: duration {waveform.shape[1]/effective_sample_rate:.2f}s, final sample rate {effective_sample_rate}")
+            # With funasr, we can often pass bytes directly. It handles internal preprocessing.
+            # No explicit torchaudio loading and resampling here unless funasr requires a specific format not derived from bytes.
+            # The `input` parameter for model.generate can be a file path, bytes, or a NumPy array.
+            logger.info(f"Audio received: {audio_file.filename}, size: {len(audio_bytes)} bytes. Passing to funasr model.")
 
         except Exception as e:
-            logger.error(f"Error during audio preprocessing for {audio_file.filename}: {e}", exc_info=True)
-            raise AudioProcessingError(f"Failed to preprocess audio: {e}")
+            logger.error(f"Error reading or preparing audio file {audio_file.filename}: {e}", exc_info=True)
+            raise AudioProcessingError(f"Failed to read or prepare audio: {e}")
 
-        # 2. Model Inference
+        # Model Inference using funasr
         try:
-            # Process audio using the Hugging Face processor
-            # The processor prepares features for the model and can also handle moving data to the correct device.
-            # Squeezing waveform assuming it's [1, num_samples] for mono audio.
-            inputs = self.processor(waveform.squeeze(0).cpu().numpy(), sampling_rate=effective_sample_rate, return_tensors="pt")
+            # Parameters for model.generate (refer to funasr/SenseVoice documentation for specifics):
+            # - input: audio file path, bytes, or numpy array
+            # - language: "auto", "zh", "en", etc.
+            # - use_itn: bool (Inverse Text Normalization for punctuation, numbers)
+            # - batch_size_s: for dynamic batching if sending multiple segments
+            # - merge_vad: bool, if VAD is used and segments need merging
+            # - cache: for storing intermediate results (e.g., VAD segments)
+            # For a single file, many VAD/batching params might not be critical initially.
             
-            # Move inputs to the same device as the model if processor didn't do it (usually it does for PyTorch tensors)
-            # Check if inputs need to be manually moved. Some processors return dicts of tensors.
-            input_features = inputs.input_features # Or input_values, depending on the processor
-            if isinstance(input_features, torch.Tensor):
-                input_features = input_features.to(self.device)
-            else: # Handle cases where inputs might be a dict of tensors for more complex models
-                for key in inputs: # type: ignore
-                    if isinstance(inputs[key], torch.Tensor): # type: ignore
-                        inputs[key] = inputs[key].to(self.device) # type: ignore
-                input_features = inputs # Pass the whole dict if that's what the model expects
+            # Using io.BytesIO to ensure the input is a file-like object if funasr prefers that over raw bytes for some paths.
+            # Alternatively, many funasr models accept raw bytes or numpy arrays directly.
+            # For safety and wider compatibility within funasr, BytesIO is a good first approach.
+            audio_input = io.BytesIO(audio_bytes)
 
-            transcription = ""
-            with torch.no_grad():
-                # Assuming a generate method for sequence-to-sequence models (like Whisper, BART, T5 based ASR)
-                # Adjust max_length and other generation parameters as needed for SenseVoiceSmall
-                if hasattr(self.model, 'generate'):
-                    predicted_ids = self.model.generate(input_features, max_length=256)
-                    # Decode the predicted IDs to text using the processor
-                    # For some processors, this might be processor.batch_decode or processor.tokenizer.batch_decode
-                    transcription = self.processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
-                else:
-                    # Fallback for models that don't have a .generate() method (e.g. CTC models like Wav2Vec2)
-                    # These typically output logits that need an argmax and then decoding by the processor.
-                    logger.warning("Model does not have a 'generate' method. Attempting direct call for logits (CTC-like).")
-                    if isinstance(input_features, dict):
-                        logits = self.model(**input_features).logits
-                    else:
-                        logits = self.model(input_features).logits
-                    predicted_ids = torch.argmax(logits, dim=-1)
-                    transcription = self.processor.batch_decode(predicted_ids)[0]
+            # Critical: The `input` for `model.generate` in `funasr` expects a file path string,
+            # a list of file path strings, a numpy array, or a list of numpy arrays.
+            # It does NOT directly take io.BytesIO or raw bytes for the `input` parameter.
+            # To use the bytes, we first load it into a waveform with torchaudio, then pass the numpy array.
+
+            waveform, sample_rate = torchaudio.load(audio_input)
+            # FunASR expects the audio to be a numpy array.
+            # It also expects mono audio. If stereo, average channels.
+            if waveform.shape[0] > 1:
+                waveform = torch.mean(waveform, dim=0)
+            audio_numpy = waveform.squeeze().cpu().numpy()
+
+
+            res = self.model.generate(
+                input=audio_numpy,  # Pass the numpy array of the waveform
+                # input_len=torch.tensor([audio_numpy.shape[0]], dtype=torch.int32).to(self.device), # Might be needed by some underlying models
+                # fs=sample_rate, # Sampling rate might be needed explicitly by some models if not in processor
+                cache={}, # Default cache
+                language="auto",  # Or specify, e.g., "zh", "en"
+                use_itn=True,    # Apply Inverse Text Normalization
+                # batch_size_s=60, # Example, if VAD is used and batching by seconds
+                # merge_vad=True, 
+                # merge_length_s=15,
+            )
+
+            if not res or not isinstance(res, list) or not res[0].get("text"):
+                logger.error(f"Transcription failed or returned unexpected format from funasr model for {audio_file.filename}. Result: {res}")
+                raise ModelInferenceError("Transcription failed: empty or malformed result from funasr model.")
+            
+            # FunASR can return rich transcriptions with timestamps, emotions etc.
+            # We use rich_transcription_postprocess to get a clean text string.
+            transcription = rich_transcription_postprocess(res[0]["text"])
 
             if not transcription:
-                # This case should ideally not be hit if model.generate or logit processing works.
-                logger.error("Transcription resulted in an empty string after model inference.")
-                raise ModelInferenceError("Transcription failed: empty result from model.")
+                logger.error(f"Post-processed transcription is empty for {audio_file.filename}.")
+                # It's possible for audio to have no speech, which is not strictly an error.
+                # Depending on requirements, this might be treated differently.
+                # For now, we'll return an empty string, but log it.
+                transcription = "" # Or raise ModelInferenceError if empty is always an error
 
             logger.info(f"Transcription successful for {audio_file.filename}.")
 
         except RuntimeError as e:
-            logger.error(f"Runtime error during model inference for {audio_file.filename}: {e}", exc_info=True)
+            logger.error(f"Runtime error during funasr model inference for {audio_file.filename}: {e}", exc_info=True)
             if "CUDA out of memory" in str(e):
                 raise ModelInferenceError("CUDA out of memory during inference. Try a smaller audio file or check GPU.")
-            raise ModelInferenceError(f"Model inference runtime error: {e}")
+            raise ModelInferenceError(f"Funasr model inference runtime error: {e}")
         except Exception as e:
-            logger.error(f"Unexpected error during model inference for {audio_file.filename}: {e}", exc_info=True)
-            raise ModelInferenceError(f"Model inference failed unexpectedly: {e}")
+            logger.error(f"Unexpected error during funasr model inference for {audio_file.filename}: {e}", exc_info=True)
+            raise ModelInferenceError(f"Funasr model inference failed unexpectedly: {e}")
 
         end_time = time.perf_counter()
         processing_time_ms = (end_time - start_time) * 1000
@@ -161,5 +151,5 @@ class ASRService:
     #     # For example, applying argmax, then mapping indices to characters/tokens.
     #     raise NotImplementedError("Custom model output decoding is not implemented.")
 
-# This import should be at the top, but to avoid breaking the dummy transcription if asyncio isn't used yet:
+# Keep asyncio import for future use or if other parts of the service need it.
 import asyncio 

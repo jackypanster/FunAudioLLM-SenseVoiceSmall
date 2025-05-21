@@ -11,6 +11,9 @@ numpy
 transformers
 sentencepiece # Often required by Hugging Face tokenizers/processors
 
+# FunASR for SenseVoice
+funasr
+
 # SenseVoice specific dependencies (Placeholder - verify with model documentation)
 # pyyaml # Example, if model's config or other files use YAML
 # other_model_specific_library

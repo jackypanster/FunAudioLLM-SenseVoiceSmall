@@ -1,19 +1,24 @@
 import os
 import logging
 import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor # Using common classes for ASR
-# If SenseVoiceSmall uses a different base model, e.g., Wav2Vec2-type CTC, you might need:
-# from transformers import AutoModelForCTC, Wav2Vec2Processor
+# from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor # Commented out
+from funasr import AutoModel # Added for SenseVoice
 
 logger = logging.getLogger(__name__)
 
-# --- Configuration --- 
-# Prefer environment variables with defaults for flexibility
-DEFAULT_MODEL_PATH = "/home/llm/model/iic/SenseVoiceSmall" # From pro.md
+# --- Configuration ---
+DEFAULT_MODEL_PATH = "/home/llm/model/iic/SenseVoiceSmall"
 DEFAULT_DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 MODEL_PATH = os.getenv("MODEL_PATH", DEFAULT_MODEL_PATH)
 DEVICE = os.getenv("DEVICE", DEFAULT_DEVICE)
+
+# Determine the model directory for funasr. This could be the HuggingFace identifier or a local path.
+# If MODEL_PATH is a local path, funasr should use it directly.
+# If MODEL_PATH was intended to be "FunAudioLLM/SenseVoiceSmall" for automatic download,
+# that's also supported by funasr's AutoModel.
+# For this project, MODEL_PATH is a local directory.
+FUNASR_MODEL_NAME_OR_PATH = MODEL_PATH
 
 class ModelLoadError(Exception):
     "Custom exception for model loading failures."
@@ -28,66 +33,90 @@ class SenseVoiceLoader:
         return cls._instance
 
     def __init__(self):
-        # Ensure __init__ is called only once for the singleton
         if hasattr(self, '_initialized') and self._initialized:
             return
         
         self.model = None
-        self.processor = None
-        self.device = DEVICE
+        # self.processor = None # Processor is likely integrated into funasr's model object
+        self.device = DEVICE # funasr's AutoModel takes device as an argument
         self._load_model()
         self._initialized = True
 
     def _load_model(self):
-        logger.info(f"Attempting to load SenseVoiceSmall model from: {MODEL_PATH} onto device: {self.device}")
+        logger.info(f"Attempting to load SenseVoiceSmall model using funasr from: {FUNASR_MODEL_NAME_OR_PATH} onto device: {self.device}")
         
-        if not os.path.isdir(MODEL_PATH):
-            logger.error(f"Model path is not a valid directory: {MODEL_PATH}")
-            raise ModelLoadError(f"Model path is not a directory: {MODEL_PATH}. Ensure it points to the root of the downloaded Hugging Face model.")
+        # Check if local path exists if FUNASR_MODEL_NAME_OR_PATH is indeed a local path
+        if not os.path.isdir(FUNASR_MODEL_NAME_OR_PATH) and "/" in FUNASR_MODEL_NAME_OR_PATH : # A simple check for path-like strings
+            logger.error(f"Model path is not a valid directory: {FUNASR_MODEL_NAME_OR_PATH}")
+            raise ModelLoadError(f"Model path is not a directory: {FUNASR_MODEL_NAME_OR_PATH}. Ensure it points to the root of the downloaded model.")
 
         try:
-            # --- Attempting to load as a Hugging Face Transformers model ---
-            # This assumes SenseVoiceSmall is compatible with AutoProcessor and AutoModelForSpeechSeq2Seq.
-            # If it's based on another architecture (e.g., Wav2Vec2 CTC), you'll need to adjust these classes.
-            logger.info(f"Loading Hugging Face processor from {MODEL_PATH}...")
-            self.processor = AutoProcessor.from_pretrained(MODEL_PATH)
-            logger.info(f"Successfully loaded processor. Loading model from {MODEL_PATH}...")
-            self.model = AutoModelForSpeechSeq2Seq.from_pretrained(MODEL_PATH)
-            logger.info("Successfully loaded model using Hugging Face Transformers.")
+            # Load model using funasr.AutoModel
+            # trust_remote_code=True is important if the model directory contains custom model.py files.
+            # The FunAudioLLM/SenseVoiceSmall repo on Hugging Face contains a model.py,
+            # so this is likely necessary.
+            # VAD (Voice Activity Detection) can be integrated here if desired, as shown in funasr examples.
+            # For now, focusing on loading the core ASR model.
+            # If your model directory /home/llm/model/iic/SenseVoiceSmall contains a 'model.py',
+            # you might need remote_code="model.py" or ensure it's picked up automatically.
+            # Based on funasr docs, model path itself should be enough if it contains all necessary files.
+            # The 'model' parameter in funasr.AutoModel refers to the model name or path.
+            self.model = AutoModel(
+                model=FUNASR_MODEL_NAME_OR_PATH,
+                # model_revision="master", # Optional: if you need a specific revision from HF
+                trust_remote_code=True,   # Crucial for models with custom code
+                device=self.device,
+                # vad_model="fsmn-vad", # Optional: VAD model, can be added later
+                # vad_kwargs={"max_single_segment_time": 30000}, # Optional: VAD arguments
+                # disable_pbar=True # Optional: to disable progress bars during download/load
+            )
             
-            self.model.to(self.device)
-            self.model.eval()
-            logger.info(f"SenseVoiceSmall model transferred to {self.device} and set to evaluation mode.")
+            # funasr's AutoModel typically loads the model and moves it to the specified device.
+            # It also handles setting it to eval mode.
+            # If the model object has an 'eval' method, it's good practice, but AutoModel might do it.
+            if hasattr(self.model, 'model') and hasattr(self.model.model, 'eval'): # Accessing the underlying torch model if nested
+                 self.model.model.eval()
+            elif hasattr(self.model, 'eval'):
+                 self.model.eval()
 
-        except OSError as e: # Catches errors like model not found, config not found at path
-            logger.error(f"OSError during Hugging Face model loading from {MODEL_PATH}: {e}", exc_info=True)
-            logger.error("Ensure that MODEL_PATH contains all necessary Hugging Face model files (config.json, pytorch_model.bin, tokenizer files, etc.).")
-            raise ModelLoadError(f"Failed to load Hugging Face model from {MODEL_PATH} due to OSError: {e}")
-        except ImportError as e: # If transformers or a dependency is missing
-             logger.error(f"ImportError during Hugging Face model loading: {e}. Ensure 'transformers' and 'sentencepiece' (and other deps) are installed.", exc_info=True)
-             raise ModelLoadError(f"Missing libraries for Hugging Face model loading: {e}")
+            logger.info(f"SenseVoiceSmall model successfully loaded using funasr and set to evaluation mode on {self.device}.")
+
+        except FileNotFoundError as e:
+            logger.error(f"FileNotFoundError during funasr model loading from {FUNASR_MODEL_NAME_OR_PATH}: {e}", exc_info=True)
+            logger.error("Ensure that the model path is correct and all necessary model files are present.")
+            raise ModelLoadError(f"Failed to load model from {FUNASR_MODEL_NAME_OR_PATH} due to FileNotFoundError: {e}")
+        except ImportError as e: 
+             logger.error(f"ImportError during funasr model loading: {e}. Ensure 'funasr' and its dependencies are installed.", exc_info=True)
+             raise ModelLoadError(f"Missing libraries for funasr model loading: {e}")
         except torch.cuda.OutOfMemoryError:
             logger.error(f"CUDA out of memory while loading model to {self.device}.")
             raise ModelLoadError(f"CUDA out of memory on {self.device} during model load.")
-        except Exception as e: # Catch-all for other unexpected errors
-            logger.error(f"An unexpected error occurred while loading the Hugging Face model: {e}", exc_info=True)
-            raise ModelLoadError(f"Failed to load model from {MODEL_PATH} due to an unexpected error: {e}")
+        except Exception as e: 
+            logger.error(f"An unexpected error occurred while loading the model with funasr: {e}", exc_info=True)
+            raise ModelLoadError(f"Failed to load model from {FUNASR_MODEL_NAME_OR_PATH} with funasr due to an unexpected error: {e}")
 
     def get_model(self):
         if self.model is None:
-            # This might happen if initial loading failed and was caught by lifespan,
-            # but something tries to access it again.
             logger.error("Attempted to get model, but it's not loaded (likely due to an earlier error).")
             raise ModelLoadError("Model is not available. Check startup logs for loading errors.")
         return self.model
 
     def get_processor(self):
-        if self.processor is None:
-            logger.warning("Attempted to get processor, but it's not loaded. This might be an issue if the model requires it.")
-        return self.processor
+        # funasr's AutoModel typically integrates the processor.
+        # The main model object is used for inference.
+        # If a separate processor object is indeed available and needed, this needs adjustment.
+        # For now, returning None or the model itself if it acts as its own processor.
+        logger.warning("get_processor() called, but funasr.AutoModel usually integrates the processor. Returning the model object or None.")
+        # Check if the loaded model object has a 'processor' attribute or similar
+        if hasattr(self.model, 'processor'):
+            return self.model.processor
+        elif hasattr(self.model, 'tokenizer'): # Some models might expose tokenizer
+            return self.model.tokenizer
+        # If not, the service layer will need to use the model object directly
+        return None 
 
     def get_device(self) -> str:
         return self.device
 
-# Global instance for easy access, managed by FastAPI lifespan or dependency injection
-# model_loader = SenseVoiceLoader() # This can be instantiated in main.py lifespan 
+# Global instance (optional, manage via DI or lifespan in main.py)
+# model_loader = SenseVoiceLoader() 
