@@ -7,12 +7,12 @@ torch
 torchaudio
 numpy
 
-# Hugging Face Transformers (if SenseVoice is loaded this way)
-# transformers
+# Hugging Face Transformers
+transformers
+sentencepiece # Often required by Hugging Face tokenizers/processors
 
 # SenseVoice specific dependencies (Placeholder - verify with model documentation)
-# sentencepiece
-# pyyaml
+# pyyaml # Example, if model's config or other files use YAML
 # other_model_specific_library
 
 # For environment variable loading (optional, if you use .env files)
